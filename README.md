@@ -3,6 +3,11 @@
 Make sure you have aws credentials setup, aws cli, eksctl (https://eksctl.io/installation/), kubectl (1.30, https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/), helm (https://helm.sh/docs/intro/install/) installed.
 If you're using cloud9 as your IDE, make sure you have AWS managed temporary credential turned off and remove the `aws_session_token = ` line ~/.aws/credentials.
 
+```
+chmod +x ./tools/tool-setup.sh
+./tools/tool-setup.sh
+```
+
 ## Step 0 Create a EKS Cluster with Karpenter installed
 Following the steps 1-4 in https://karpenter.sh/docs/getting-started/getting-started-with-karpenter/. 
 Recommend to change instance type to m6i.large, CLUSTER_NAME=EMR_EKS
@@ -13,6 +18,8 @@ export DEFAULT_AZ=${AWS_REGION}d
 
 aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 ```
+Following the steps "Create IAM Roles" in https://karpenter.sh/docs/getting-started/migrating-from-cas/
+
 ## Step 1 Add Service Accounts to Your EKS Cluster
 Create the EMR job execution which has access to your S3 bucket
 ```
@@ -31,6 +38,7 @@ chmod +x job-execution-role.sh
 Create the ebs controller service account 
 Is this needed? cross account kyuubi execution service account
 ```
+eksctl utils associate-iam-oidc-provider --region=$AWS_DEFAULT_REGION --cluster=$CLUSTER_NAME --approve
 envsubst < service-accounts.yaml | eksctl create iamserviceaccount --config-file=- --approve
 ```
 ## Step 2 Setup EMR on EKS
@@ -39,15 +47,34 @@ export EMRCLUSTER_NAME=${CLUSTER_NAME}-emr
 chmod +x emr-setup.sh
 ./emr-setup.sh
 ```
-## Step 3 Create Karpenter NodePool
+## Step 3 Create Karpenter and Karpenter NodePool
 ```
-envsubst < karpenter-emr-nodepool.yaml | kubectl apply -f -
+# Logout of helm registry to perform an unauthenticated pull against the public ECR
+helm registry logout public.ecr.aws
+
+helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter --version "${KARPENTER_VERSION}" --namespace "${KARPENTER_NAMESPACE}" --create-namespace \
+  --set "settings.clusterName=${CLUSTER_NAME}" \
+  --set "settings.interruptionQueue=${CLUSTER_NAME}" \
+  --set controller.resources.requests.cpu=1 \
+  --set controller.resources.requests.memory=1Gi \
+  --set controller.resources.limits.cpu=1 \
+  --set controller.resources.limits.memory=1Gi 
+  
+```
+
+创建nodepool和nodeclass
+```
+
+envsubst < karpenter-emr-nodepool.yaml | kubectl apply -f -\
+
 ```
 
 ## Step 4 Test The Vanilla Job Run
 Please replace the EMRCLUSTER_ID with your EMR virtual cluster ID
 ```
-export EMRCLUSTER_ID=ekjfutq5yadjc6626hmptqiq1
+sudo yum install jq -y
+EMRCLUSTER_ID=$(aws emr-containers list-virtual-clusters | jq -r --arg name "$EMRCLUSTER_NAME" '.virtualClusters[] | select(.name == $name) | .id')
+
 chmod +x start-job-run.sh
 ./start-job-run.sh
 ```
@@ -63,6 +90,8 @@ chmod +x start-job-run-pod-template.sh
 ```
 
 ## Step 6 Create Kyuubi Image and Deploy
+
+Option 1: Build your own Kyuubi image
 ```
 export ECR_URL=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 chmod +x build-kyuubi-docker.sh
@@ -70,6 +99,13 @@ chmod +x build-kyuubi-docker.sh
 
 envsubst < charts/my-kyuubi-values.yaml | helm install kyuubi charts/kyuubi -n emr --create-namespace -f - --debug
 kubectl get pods -n emr
+```
+Option 2: Use the public image: public.ecr.aws/l2l6g0y5/emr-eks-kyuubi:6.10_180
+
+```
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+export ECR_URL=public.ecr.aws/l2l6g0y5
+
 ```
 
 ## Step 7 Login the Kyuubi Pod and Test It
@@ -79,7 +115,7 @@ kubectl exec -it pod/kyuubi-0 -n emr -- bash
 ```
 # execute in the Kyuubi pod's shell. Spark submit test
 export S3_BUCKET="YOUR_BUCKET"
-aws s3 cp /usr/lib/spark/examples/jars/spark-examples s3://${S3_BUCKET}/jars
+aws s3 cp /usr/lib/spark/examples/jars/spark-examples.jar s3://${S3_BUCKET}/jars
 
 /usr/lib/spark/bin/spark-submit \
 --class org.apache.spark.examples.SparkPi \

@@ -1,0 +1,40 @@
+apiVersion: karpenter.k8s.aws/v1beta1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  amiFamily: AL2
+  subnetSelectorTerms:
+    # Select on any subnet that has the "karpenter.sh/discovery: emr-eks-karpenter-kyuubi" 
+    # AND the "environment: test" tag OR any subnet with ID "subnet-09fa4a0a8f233a921"
+    - tags:
+        eksctl.cluster.k8s.io/v1alpha1/cluster-name: 
+        kubernetes.io/role/internal-elb: "1"
+
+  securityGroupSelectorTerms:
+    - tags:
+        eksctl.cluster.k8s.io/v1alpha1/cluster-name: 
+
+  role: "KarpenterNodeRole-"
+
+  # Optional, propagates tags to underlying EC2 resources
+  tags:
+    Name: eks-20240224-od-arm
+
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 2
+    httpTokens: optional
+
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 500Gi
+        volumeType: gp3
+        iops: 3000
+        deleteOnTermination: true
+        throughput: 125
+
+  detailedMonitoring: true
+  
